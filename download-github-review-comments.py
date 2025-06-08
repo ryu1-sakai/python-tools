@@ -30,6 +30,12 @@ def print_github_api_rate_limit_info(response):
     print(f"API Rate Limit: limit={limit} cost={cost} remaining={remaining}")
 
 @dataclass
+class PaginatedList[T]:
+    elements: list[T]
+    end_cursor: str
+    has_next: bool
+
+@dataclass
 class PullRequest:
     number: int
     review_count: int
@@ -52,6 +58,10 @@ def get_pull_requests(gql_client, owner, name, status, after, size):
                   totalCount
                 }
               }
+              pageInfo {
+                endCursor
+                hasNextPage
+              }
             }
           }
           rateLimit {
@@ -72,16 +82,22 @@ def get_pull_requests(gql_client, owner, name, status, after, size):
     response = gql_client.execute(query, variable_values = variable_values)
     print_github_api_rate_limit_info(response)
     nodes = response['repository']['pullRequests']['nodes']
-    return list(map(lambda n: PullRequest.from_graphql_node(n), nodes))
+    page_info = response['repository']['pullRequests']['pageInfo']
+    return PaginatedList(
+        elements=list(map(lambda n: PullRequest.from_graphql_node(n), nodes)),
+        end_cursor=page_info['endCursor'],
+        has_next=page_info['hasNextPage'],
+    )
 
 def iterate_pull_requests(gql_client, owner, name, status, after =''):
     page_size = 100
     while True:
-        prs = get_pull_requests(gql_client=gql_client, owner=owner, name=name, status=status, after=after, size=page_size)
-        for id in prs:
-            yield id
-        if len(prs) < page_size:
+        response = get_pull_requests(gql_client=gql_client, owner=owner, name=name, status=status, after=after, size=page_size)
+        for pr in response.elements:
+            yield pr
+        if not response.has_next:
             break
+        after=response.end_cursor
 
 @dataclass
 class ReviewComment:
