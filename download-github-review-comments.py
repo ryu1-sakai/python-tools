@@ -8,23 +8,19 @@ from itertools import islice
 from gql import Client, gql
 from gql.transport.requests import RequestsHTTPTransport
 
-GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
-if not GITHUB_TOKEN:
-    print('ERROR: GITHUB_TOKEN is not available', file=sys.stderr)
-    exit(1)
-
 API_URL = 'https://api.github.com/graphql'
 
-transport = RequestsHTTPTransport(
-    url=API_URL,
-    headers={
-        'Authorization': f'bearer {GITHUB_TOKEN}',
-        'Content-Type': 'application/json',
-    },
-    verify=True,
-    retries=3,
-)
-client = Client(transport=transport, fetch_schema_from_transport=True)
+def create_graphql_client(github_access_token):
+    transport = RequestsHTTPTransport(
+        url=API_URL,
+        headers={
+            'Authorization': f'bearer {github_access_token}',
+            'Content-Type': 'application/json',
+        },
+        verify=True,
+        retries=3,
+    )
+    return Client(transport=transport, fetch_schema_from_transport=True)
 
 def print_github_api_rate_limit_info(response):
     rate_limit = response['rateLimit']
@@ -44,7 +40,7 @@ class PullRequest:
         review_count = node['reviews']['totalCount']
         return PullRequest(number=number, review_count=review_count)
 
-def get_pull_requests(owner, name, status, after, size):
+def get_pull_requests(gql_client, owner, name, status, after, size):
     query = gql(
         """
         query GetPullRequests($owner: String!, $name: String!, $after: String!, $size: Int!, $status: PullRequestState!) {
@@ -73,15 +69,15 @@ def get_pull_requests(owner, name, status, after, size):
         'size': size,
         'status': status,
     }
-    response = client.execute(query, variable_values = variable_values)
+    response = gql_client.execute(query, variable_values = variable_values)
     print_github_api_rate_limit_info(response)
     nodes = response['repository']['pullRequests']['nodes']
     return list(map(lambda n: PullRequest.from_graphql_node(n), nodes))
 
-def iterate_pull_requests(owner, name, status, after =''):
+def iterate_pull_requests(gql_client, owner, name, status, after =''):
     page_size = 100
     while True:
-        prs = get_pull_requests(owner=owner, name=name, status=status, after=after, size=page_size)
+        prs = get_pull_requests(gql_client=gql_client, owner=owner, name=name, status=status, after=after, size=page_size)
         for id in prs:
             yield id
         if len(prs) < page_size:
@@ -100,7 +96,7 @@ class ReviewComment:
         body = node['body']
         return ReviewComment(id=id, path=path, body=body)
 
-def get_pull_request_review_comments(owner, name, pr_number):
+def get_pull_request_review_comments(gql_client, owner, name, pr_number):
     query = gql(
         """
         query GetPullRequestReviewComments($owner: String!, $name: String!, $prNumber: Int!) {
@@ -133,7 +129,7 @@ def get_pull_request_review_comments(owner, name, pr_number):
         'name': name,
         'prNumber': pr_number,
     }
-    response = client.execute(query, variable_values = variable_values)
+    response = gql_client.execute(query, variable_values = variable_values)
     print_github_api_rate_limit_info(response)
     review_nodes = response['repository']['pullRequest']['reviews']['nodes']
     comment_nodes = [cnode for rnode in review_nodes for cnode in rnode['comments']['nodes']]
@@ -141,36 +137,45 @@ def get_pull_request_review_comments(owner, name, pr_number):
     for comment in comments:
         yield comment
 
-def iterate_pull_request_review_comments(owner, name, status):
-    # pr_iter = iterate_pull_requests(owner='ktorio', name='ktor', status='MERGED')
-    pr_iter = iterate_pull_requests(owner=owner, name=name, status=status)
+def iterate_pull_request_review_comments(gql_client, owner, name, status):
+    pr_iter = iterate_pull_requests(gql_client=gql_client, owner=owner, name=name, status=status)
     reviewed_prs = filter(lambda pr: pr.review_count > 0, pr_iter)
     for pr in reviewed_prs:
-        yield from get_pull_request_review_comments(owner='ktorio', name='ktor', pr_number=pr.number)
+        yield from get_pull_request_review_comments(gql_client=gql_client, owner=owner, name=name, pr_number=pr.number)
 
-def download_pull_request_review_comments(owner, name, output_file, extension = None, max_rows = None):
-    review_comment_iter = iterate_pull_request_review_comments(owner=owner, name=name, status='MERGED')
-    if max_rows:
-        review_comment_iter = islice(review_comment_iter, 200)
+def download_pull_request_review_comments(gql_client, owner, name, output_file, extension = None, max_rows = None):
+    print(f'Downloading PR comments from {owner}/{name} (max={max_rows})')
+    review_comment_iter = iterate_pull_request_review_comments(gql_client=gql_client, owner=owner, name=name, status='MERGED')
     if extension:
         review_comment_iter = filter(lambda rc: rc.path.endswith(extension), review_comment_iter)
+    if max_rows:
+        review_comment_iter = islice(review_comment_iter, max_rows)
     with open(output_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         for rc in review_comment_iter:
             row = [rc.path, rc.body]
             writer.writerow(row)
 
-parser = argparse.ArgumentParser(description='Download PR comments of GitHub repository')
-parser.add_argument('owner', type=str, help='repository owner')
-parser.add_argument('name', type=str, help='repository name')
-parser.add_argument('output', type=str, help='output file path')
-parser.add_argument('-x', '--max', type=int, help='max rows to output')
-args = parser.parse_args()
+if __name__ == '__main__':
+    github_token = os.getenv('GITHUB_TOKEN')
+    if not github_token:
+        print('ERROR: GITHUB_TOKEN is not available', file=sys.stderr)
+        exit(1)
+    client = create_graphql_client(github_token)
 
-download_pull_request_review_comments(
-    owner=args.owner,
-    name=args.name,
-    extension='.kt',
-    output_file=args.output,
-    max_rows=args.max,
-)
+    parser = argparse.ArgumentParser(description='Download PR comments of GitHub repository')
+    parser.add_argument('owner', type=str, help='repository owner')
+    parser.add_argument('name', type=str, help='repository name')
+    parser.add_argument('-o', '--output', type=str, help='output file path')
+    parser.add_argument('-x', '--max', type=int, help='max comments to download')
+    args = parser.parse_args()
+
+    output = args.output if args.output else f'{args.owner}-{args.name}.csv'
+    download_pull_request_review_comments(
+        gql_client=client,
+        owner=args.owner,
+        name=args.name,
+        extension='.kt',
+        output_file=output,
+        max_rows=args.max,
+    )
