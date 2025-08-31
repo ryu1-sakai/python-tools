@@ -104,13 +104,16 @@ class ReviewComment:
     id: str
     path: str
     body: str
+    parent_comment_id: str
 
     @classmethod
     def from_graphql_node(cls, node):
         id = node['id']
         path = node['path']
         body = node['body']
-        return ReviewComment(id=id, path=path, body=body)
+        reply_to = node['replyTo']
+        parent_comment_id = reply_to['id'] if reply_to != None else None
+        return ReviewComment(id=id, path=path, body=body, parent_comment_id=parent_comment_id)
 
 def get_pull_request_review_comments(gql_client, owner, name, pr_number):
     query = gql(
@@ -126,6 +129,9 @@ def get_pull_request_review_comments(gql_client, owner, name, pr_number):
                       id
                       path
                       body
+                      replyTo {
+                        id
+                      }
                     }
                   }
                 }
@@ -159,8 +165,8 @@ def iterate_pull_request_review_comments(gql_client, owner, name, status):
     for pr in reviewed_prs:
         yield from get_pull_request_review_comments(gql_client=gql_client, owner=owner, name=name, pr_number=pr.number)
 
-def download_pull_request_review_comments(gql_client, owner, name, output_file, extension = None, max_rows = None):
-    print(f'Downloading PR comments from {owner}/{name} (max={max_rows})')
+def download_pull_request_review_comments(gql_client, owner, name, output_file, only_root, extension = None, max_rows = None):
+    print(f'Downloading PR comments from {owner}/{name} (max={max_rows}, only_root={only_root})')
     review_comment_iter = iterate_pull_request_review_comments(gql_client=gql_client, owner=owner, name=name, status='MERGED')
     if extension:
         review_comment_iter = filter(lambda rc: rc.path.endswith(extension), review_comment_iter)
@@ -169,6 +175,8 @@ def download_pull_request_review_comments(gql_client, owner, name, output_file, 
     with open(output_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         for rc in review_comment_iter:
+            if only_root and rc.parent_comment_id is not None:
+                continue # rc.parent_comment_id is not None --> not a root comment
             row = [rc.path, rc.body]
             writer.writerow(row)
 
@@ -183,6 +191,7 @@ if __name__ == '__main__':
     parser.add_argument('owner', type=str, help='repository owner')
     parser.add_argument('name', type=str, help='repository name')
     parser.add_argument('-o', '--output', type=str, help='output file path')
+    parser.add_argument('-r', '--only-root', action='store_true', help='selects only root comments')
     parser.add_argument('-x', '--max', type=int, help='max comments to download')
     args = parser.parse_args()
 
@@ -191,6 +200,7 @@ if __name__ == '__main__':
         gql_client=client,
         owner=args.owner,
         name=args.name,
+        only_root=args.only_root,
         extension='.kt',
         output_file=output,
         max_rows=args.max,
